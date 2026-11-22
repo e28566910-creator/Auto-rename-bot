@@ -4,29 +4,61 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 _INVALID_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+_INVISIBLE_CHARS = re.compile(r"[\u200b-\u200d\ufeff]")
 _SPACE_RUN = re.compile(r"[\s._-]+")
 
+# Use ASCII alphanumeric boundaries instead of \b / \w so underscore-separated
+# Telegram filenames (e.g. _S01E04_Tamil_480p_) parse accurately.
 QUALITY_PATTERNS = [
-    (re.compile(r"(?<!\d)(2160p|4k)(?!\w)", re.I), "2160p"),
-    (re.compile(r"(?<!\d)(1440p|2k)(?!\w)", re.I), "1440p"),
-    (re.compile(r"(?<!\d)(1080p)(?!\w)", re.I), "1080p"),
-    (re.compile(r"(?<!\d)(720p)(?!\w)", re.I), "720p"),
-    (re.compile(r"(?<!\d)(480p)(?!\w)", re.I), "480p"),
-    (re.compile(r"(?<!\d)(360p)(?!\w)", re.I), "360p"),
+    (re.compile(r"(?<![A-Za-z0-9])(2160p|4k|uhd)(?![A-Za-z0-9])", re.I), "2160p"),
+    (re.compile(r"(?<![A-Za-z0-9])(1440p|2k)(?![A-Za-z0-9])", re.I), "1440p"),
+    (re.compile(r"(?<![A-Za-z0-9])(1080p)(?![A-Za-z0-9])", re.I), "1080p"),
+    (re.compile(r"(?<![A-Za-z0-9])(720p)(?![A-Za-z0-9])", re.I), "720p"),
+    (re.compile(r"(?<![A-Za-z0-9])(480p)(?![A-Za-z0-9])", re.I), "480p"),
+    (re.compile(r"(?<![A-Za-z0-9])(360p)(?![A-Za-z0-9])", re.I), "360p"),
 ]
 
 SEASON_EPISODE_PATTERNS = [
-    re.compile(r"(?i)\bS(\d{1,2})\s*(?:E|EP)(\d{1,4})\b"),
-    re.compile(r"(?i)\bSeason\s*(\d{1,2})\s*(?:Episode|Ep)\s*(\d{1,4})\b"),
-    re.compile(r"(?i)\b(?:Season|S)\s*(\d{1,2})\s*[-_. ]+\s*(?:Episode|Ep|E)\s*(\d{1,4})\b"),
+    re.compile(
+        r"(?i)(?<![A-Za-z0-9])(?:Season|S)[\s._-]*(\d{1,2})[\s._-]*(?:Episodes?|Epi|Ep|E)[\s._#-]*(\d{1,4})(?:v\d)?(?![A-Za-z0-9])"
+    ),
+    re.compile(r"(?i)(?<![A-Za-z0-9])(\d{1,2})x(\d{1,4})(?:v\d)?(?![A-Za-z0-9])"),
 ]
 EPISODE_PATTERNS = [
-    re.compile(r"(?i)\b(?:Episode|Episodes|Epi|Ep|E)\s*[-_.# ]*0*(\d{1,4})\b"),
-    re.compile(r"(?i)\b#\s*0*(\d{1,4})\b"),
+    re.compile(r"(?i)(?<![A-Za-z0-9])(?:Episodes?|Epi|Ep|E)[\s._#-]*0*(\d{1,4})(?:v\d)?(?![A-Za-z0-9])"),
+    re.compile(r"(?i)(?<![A-Za-z0-9])#\s*0*(\d{1,4})(?:v\d)?(?![A-Za-z0-9])"),
 ]
+_SEPARATE_SEASON_PATTERN = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(?:Season[\s._-]*(\d{1,2})|S(\d{1,2}))(?![A-Za-z0-9])"
+)
+
+_HANDLE_PATTERN = re.compile(r"@[A-Za-z0-9_.]+")
+_METADATA_TAG_PATTERN = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(?:"
+    r"web[\s._-]*dl|web[\s._-]*rip|webrip|bluray|blu[\s._-]*ray|bdrip|hdrip|hdtv|"
+    r"x264|x265|h[\s._-]?264|h[\s._-]?265|hevc|avc|av1|aac|ac3|eac3|ddp(?:5\.1)?|flac|opus|"
+    r"10[\s._-]*bit|8[\s._-]*bit|"
+    r"dual[\s._-]*audio|multi[\s._-]*audio|multi[\s._-]*sub|esub|esubs|msub|msubs|"
+    r"(?:tamil|hindi|telugu|malayalam|kannada)(?:[\s._-]*(?:dub|dubbed|sub|subbed))?|"
+    r"(?:english|eng|jap|jpn|japanese)[\s._-]*(?:dub|dubbed|sub|subbed)"
+    r")(?![A-Za-z0-9])"
+)
+_BRACKET_METADATA_TOKEN = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(?:"
+    r"web[\s._-]*dl|web[\s._-]*rip|webrip|bluray|blu[\s._-]*ray|bdrip|hdrip|hdtv|"
+    r"x264|x265|h[\s._-]?264|h[\s._-]?265|hevc|avc|av1|aac|ac3|eac3|ddp(?:5\.1)?|flac|opus|"
+    r"10[\s._-]*bit|8[\s._-]*bit|hdr(?:10)?|sdr|"
+    r"dual[\s._-]*audio|multi[\s._-]*audio|multi[\s._-]*sub|multi|dual|"
+    r"esub|esubs|msub|msubs|sub|subs|subbed|dub|dubbed|uncensored|raw|"
+    r"tamil|tam|hindi|hin|telugu|tel|malayalam|mal|kannada|kan|"
+    r"english|eng|japanese|jap|jpn|korean|kor|"
+    r"2160p|1440p|1080p|720p|480p|360p|4k|2k|uhd"
+    r")(?![A-Za-z0-9])"
+)
+_EMPTY_BRACKETS_PATTERN = re.compile(r"\[\s*[-+&/,._]*\s*\]|\(\s*[-+&/,._]*\s*\)")
 
 QUALITY_ORDER = {
     "360p": 0,
@@ -53,21 +85,30 @@ def split_filename(filename: str) -> Tuple[str, str]:
 
 
 def extract_quality(filename: str) -> Optional[str]:
+    cleaned = _INVISIBLE_CHARS.sub("", filename or "")
     for pattern, quality in QUALITY_PATTERNS:
-        if pattern.search(filename):
+        if pattern.search(cleaned):
             return quality
     return None
 
 
-def _episode_match(stem: str):
+def _episode_match(stem: str) -> Tuple[Optional[int], Optional[int], List[Tuple[int, int]]]:
     for pattern in SEASON_EPISODE_PATTERNS:
         match = pattern.search(stem)
         if match:
-            return int(match.group(1)), int(match.group(2)), match.span()
+            return int(match.group(1)), int(match.group(2)), [match.span()]
+
     for pattern in EPISODE_PATTERNS:
         match = pattern.search(stem)
         if match:
-            return None, int(match.group(1)), match.span()
+            spans = [match.span()]
+            masked = stem[:match.start()] + (" " * (match.end() - match.start())) + stem[match.end():]
+            season_match = _SEPARATE_SEASON_PATTERN.search(masked)
+            season = None
+            if season_match:
+                season = int(season_match.group(1) or season_match.group(2))
+                spans.append(season_match.span())
+            return season, int(match.group(1)), spans
 
     # Last numeric token is a conservative fallback for common releases such as
     # "Naruto - 012 - 1080p". Avoid resolution values and four-digit years.
@@ -84,16 +125,16 @@ def _episode_match(stem: str):
         after_ok = match.end() == len(candidate_stem) or candidate_stem[match.end()] in " ._-"
         value = int(match.group(1))
         if before_ok and after_ok and 0 <= value <= 999:
-            return None, value, match.span()
-    return None, None, None
+            return None, value, [match.span()]
+    return None, None, []
 
 
 def _remove_release_brackets(text: str) -> str:
-    """Remove likely release-group/hash brackets without deleting bracketed titles."""
+    """Remove likely release-group/hash/metadata brackets without deleting bracketed titles."""
     known_groups = {
         "subsplease", "erai-raws", "erai raws", "judas", "horriblesubs",
         "anime time", "animetime", "ember", "lostyears", "asw", "golumpa",
-        "tsundere-raws", "toons hub", "toonshub",
+        "tsundere-raws", "toons hub", "toonshub", "toonworld4all",
     }
 
     def replace(match):
@@ -104,38 +145,38 @@ def _remove_release_brackets(text: str) -> str:
         is_known_group = normalized in known_groups
         is_site_tag = bool(re.search(r"(?i)(?:www\.|\.(?:com|net|org)\b)", content))
         is_empty = not content
-        return " " if (is_hash or is_short_release_code or is_known_group or is_site_tag or is_empty) else match.group(0)
+        metadata_stripped = _BRACKET_METADATA_TOKEN.sub(" ", content)
+        is_metadata_only = not re.search(r"[A-Za-z0-9]", metadata_stripped)
+        if is_hash or is_short_release_code or is_known_group or is_site_tag or is_empty or is_metadata_only:
+            return " "
+        return match.group(0)
 
     text = re.sub(r"\[([^\]]*)\]", replace, text)
-    text = re.sub(r"\(\s*\)|\[\s*\]", " ", text)
+    text = _EMPTY_BRACKETS_PATTERN.sub(" ", text)
     return text
 
 
 def parse_media_name(filename: str) -> ParsedMediaName:
     stem, _extension = split_filename(filename)
-    season, episode, episode_span = _episode_match(stem)
+    stem = _INVISIBLE_CHARS.sub("", stem)
+    season, episode, episode_spans = _episode_match(stem)
     quality = extract_quality(stem)
 
     title = stem
-    if episode_span:
-        title = title[:episode_span[0]] + " " + title[episode_span[1]:]
+    for start, end in sorted(episode_spans, reverse=True):
+        title = title[:start] + " " + title[end:]
     for pattern, _quality in QUALITY_PATTERNS:
         title = pattern.sub(" ", title)
+
+    # Remove source handles before bracket cleanup so [@Channel] empties cleanly.
+    title = _HANDLE_PATTERN.sub(" ", title)
     title = _remove_release_brackets(title)
 
-    # Remove source handles (including underscores) from the original filename.
-    # The user's own template prefix is unaffected because this runs on the source.
-    title = re.sub(r"@\S*", " ", title)
-
-    # Remove common release metadata without over-stripping real title words.
-    title = re.sub(
-        r"(?i)\b(?:web[- .]?dl|webrip|bluray|bdrip|hdtv|x264|x265|hevc|aac|10bit|8bit|dual[ ._-]?audio|multi[ ._-]?audio|tamil[ ._-]?dub|hindi[ ._-]?dub|telugu[ ._-]?dub|tamil|hindi|telugu)\b",
-        " ",
-        title,
-    )
+    # Remove common release/language metadata without over-stripping real title words.
+    title = _METADATA_TAG_PATTERN.sub(" ", title)
     title = re.sub(r"\[[^\]]*(?:www\.|\.com|\.net|\.org)[^\]]*\]", " ", title, flags=re.I)
     title = title.replace("(", " ").replace(")", " ")
-    title = re.sub(r"\[\s*\]", " ", title)
+    title = _EMPTY_BRACKETS_PATTERN.sub(" ", title)
     title = _SPACE_RUN.sub(" ", title).strip(" -_.[]()")
     return ParsedMediaName(season=season, episode=episode, quality=quality, title=title or "Unknown title")
 
