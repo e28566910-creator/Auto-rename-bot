@@ -1,70 +1,118 @@
 from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery,
+)
+
 from helper.database import codeflixbots
+from helper.scope import get_scope_id
 
-@Client.on_message(filters.private & filters.command("autorename"))
+
+def _callback_scope_id(query):
+    """
+    Use the channel ID for channel keyboards.
+    Use the clicking user's ID for private-chat keyboards.
+    """
+    chat = getattr(query.message, "chat", None)
+
+    if chat:
+        chat_type = getattr(chat, "type", None)
+        type_name = str(
+            getattr(chat_type, "value", chat_type)
+        ).lower()
+
+        if type_name.endswith("channel"):
+            return int(chat.id)
+
+    return int(query.from_user.id)
+
+
+@Client.on_message(
+    (filters.private | filters.channel) & filters.command("autorename")
+)
 async def auto_rename_command(client, message):
-    user_id = message.from_user.id
+    scope_id = get_scope_id(message)
 
-    # Extract and validate the format from the command
-    command_parts = message.text.split(maxsplit=1)
+    command_text = message.text or ""
+    command_parts = command_text.split(maxsplit=1)
+
     if len(command_parts) < 2 or not command_parts[1].strip():
-        await message.reply_text(
-            "**Please provide a new name after the command /autorename**\n\n"
-            "Here's how to use it:\n"
-            "**Example format:** `/autorename Overflow [S{season}E{episode}] - [Dual] {quality}`"
+        return await message.reply_text(
+            "**Please provide a new name after /autorename.**\n\n"
+            "**Example:**\n"
+            "`/autorename Overflow [S{season}E{episode}] - [Dual] {quality}`"
         )
-        return
 
     format_template = command_parts[1].strip()
 
-    # Save the format template in the database
-    await codeflixbots.set_format_template(user_id, format_template)
+    await codeflixbots.set_format_template(
+        scope_id,
+        format_template,
+    )
 
-    # Send confirmation message with the template in monospaced font
     await message.reply_text(
-        f"**🌟 Fantastic! You're ready to auto-rename your files.**\n\n"
-        "📩 Simply send the file(s) you want to rename.\n\n"
-        f"**Your saved template:** `{format_template}`\n\n"
-        "Remember, it might take some time, but I'll ensure your files are renamed perfectly!✨"
+        "**✅ Auto Rename Format Saved**\n\n"
+        "Send `/start` to activate quality rename mode, "
+        "then send your files.\n\n"
+        f"**Saved format:**\n`{format_template}`"
     )
 
 
-@Client.on_message(filters.private & filters.command("setmedia"))
+@Client.on_message(
+    (filters.private | filters.channel) & filters.command("setmedia")
+)
 async def set_media_command(client, message):
-    """Initiate media type selection with a sleek inline keyboard."""
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📜 Documents", callback_data="setmedia_document")],
         [InlineKeyboardButton("🎬 Videos", callback_data="setmedia_video")],
-        [InlineKeyboardButton("🎵 Audio", callback_data="setmedia_audio")],  # Added audio option
+        [InlineKeyboardButton("🎵 Audio", callback_data="setmedia_audio")],
     ])
 
     await message.reply_text(
-        "✨ **Choose Your Media Vibe** ✨\n"
-        "Select the type of media you'd like to set as your preference:",
+        "✨ **Choose Your Media Preference** ✨\n"
+        "Select the type of media you want the bot to upload:",
         reply_markup=keyboard,
-        quote=True
     )
+
 
 @Client.on_callback_query(filters.regex(r"^setmedia_"))
 async def handle_media_selection(client, callback_query: CallbackQuery):
-    """Process the user's media type selection with flair and confirmation."""
-    user_id = callback_query.from_user.id
-    media_type = callback_query.data.split("_", 1)[1].capitalize()  # Extract and capitalize media type
+    scope_id = _callback_scope_id(callback_query)
+
+    media_type = callback_query.data.split("_", 1)[1].lower()
+
+    if media_type not in {"document", "video", "audio"}:
+        return await callback_query.answer(
+            "Invalid media type.",
+            show_alert=True,
+        )
 
     try:
-        await codeflixbots.set_media_preference(user_id, media_type.lower())
+        await codeflixbots.set_media_preference(
+            scope_id,
+            media_type,
+        )
 
-        await callback_query.answer(f"Locked in: {media_type} 🎉")
-        await callback_query.message.edit_text(
-            f"🎯 **Media Preference Updated** 🎯\n"
-            f"Your vibe is now set to: **{media_type}** ✅\n"
-            f"Ready to roll with your choice!"
+        await callback_query.answer(
+            f"Media preference saved: {media_type}"
         )
-    except Exception as e:
-        await callback_query.answer("Oops, something went wrong! 😅")
+
         await callback_query.message.edit_text(
-            f"⚠️ **Error Setting Preference** ⚠️\n"
-            f"Couldn’t set {media_type} right now. Try again later!\n"
-            f"Details: {str(e)}"
+            "**✅ Media Preference Updated**\n\n"
+            f"Your upload preference is now: **{media_type.title()}**"
         )
+
+    except Exception as error:
+        await callback_query.answer(
+            "Could not save the media preference.",
+            show_alert=True,
+        )
+
+        try:
+            await callback_query.message.edit_text(
+                f"**⚠️ Error saving media preference**\n\n"
+                f"{str(error)[:400]}"
+            )
+        except Exception:
+            pass
