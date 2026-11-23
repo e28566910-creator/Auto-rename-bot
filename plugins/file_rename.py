@@ -1,3 +1,4 @@
+
 """Concurrent, collision-safe file renaming with private and channel support."""
 
 import asyncio
@@ -24,8 +25,6 @@ from plugins.antinsfw import check_anti_nsfw
 from plugins.rename_session import (
     get_rename_mode,
     get_output_lock,
-    get_last_quality,
-    set_last_quality,
     has_sent_getlinkauto,
     mark_getlinkauto_sent,
 )
@@ -278,35 +277,47 @@ async def _remux_metadata(source_path, output_path, scope_id):
 
 async def _send_quality_headings(client, message, scope_id, parsed):
     """
-    Send /getlinkauto as plain text once.
-    Send quality heading when quality changes.
-    Send episode heading for every file.
+    Quality-mode output for EVERY file:
+
+    Message 1: Episode 04 👇
+    Message 2: **480p**
+    File:      Renamed media
+
+    The quality heading is sent even when the previous file
+    had the same quality.
     """
 
+    # Send /getlinkauto as literal text once per session.
     if not has_sent_getlinkauto(scope_id):
-        await client.send_message(
-            chat_id=message.chat.id,
-            text="/getlinkauto",
-        )
-        mark_getlinkauto_sent(scope_id)
+        try:
+            await client.send_message(
+                chat_id=message.chat.id,
+                text="/getlinkauto",
+            )
+            mark_getlinkauto_sent(scope_id)
+        except Exception:
+            logger.warning(
+                "Could not send /getlinkauto",
+                exc_info=True,
+            )
 
-    quality = parsed.quality or "Quality Unknown"
-
-    if get_last_quality(scope_id) != quality:
-        await client.send_message(
-            chat_id=message.chat.id,
-            text=f"**{quality}👇**",
-        )
-        set_last_quality(scope_id, quality)
-
+    # MESSAGE 1: Episode heading in normal text.
     if parsed.episode is not None:
-        episode_heading = f"**Episode{parsed.episode:02d}**"
+        episode_heading = f"Episode {parsed.episode:02d} 👇"
     else:
-        episode_heading = "**EpisodeUnknown**"
+        episode_heading = "Episode Unknown 👇"
 
     await client.send_message(
         chat_id=message.chat.id,
         text=episode_heading,
+    )
+
+    # MESSAGE 2: Quality heading in bold.
+    quality = parsed.quality or "Quality Unknown"
+
+    await client.send_message(
+        chat_id=message.chat.id,
+        text=f"**{quality}**",
     )
 
 
@@ -463,8 +474,10 @@ async def _process_rename(client, message, details, template, mode):
                 ),
             }
 
+            # Lock keeps the headings and file together.
             async with get_output_lock(scope_id):
 
+                # Quality mode: Episode -> Quality -> File.
                 if mode == "quality":
                     await _send_quality_headings(
                         client,
@@ -473,6 +486,7 @@ async def _process_rename(client, message, details, template, mode):
                         parsed,
                     )
 
+                # NORMAL MODE skips all quality headings.
                 if output_type == "video":
                     await client.send_video(
                         video=final_path,
